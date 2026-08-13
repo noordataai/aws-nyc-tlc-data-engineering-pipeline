@@ -1,0 +1,86 @@
+{
+  "Comment": "NYC TLC Data Pipeline - Event-driven processing with failure notifications",
+  "StartAt": "RawToCurated",
+  "States": {
+    "RawToCurated": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "mission-deh-hof-nyc-tlc-raw-curated-script"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyRawToCuratedFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "CuratedToAggregated"
+    },
+    "CuratedToAggregated": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "mission-deh-hof-nyc-tlc-curated-aggregated-script"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyCuratedToAggregatedFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "PipelineSuccess"
+    },
+    "NotifyRawToCuratedFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:<YOUR_ACCOUNT_ID>:mission-deh-hof",
+        "Subject": "NYC TLC Pipeline FAILED - Raw to Curated",
+        "Message.$": "$.error"
+      },
+      "Next": "PipelineFailure"
+    },
+    "NotifyCuratedToAggregatedFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:<YOUR_ACCOUNT_ID>:mission-deh-hof",
+        "Subject": "NYC TLC Pipeline FAILED - Curated to Aggregated",
+        "Message.$": "$.error"
+      },
+      "Next": "PipelineFailure"
+    },
+    "PipelineSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:<YOUR_ACCOUNT_ID>:mission-deh-hof",
+        "Subject": "NYC TLC Pipeline SUCCESS",
+        "Message": "Pipeline completed successfully: Raw to Curated -> Curated to Aggregated"
+      },
+      "End": true
+    },
+    "PipelineFailure": {
+      "Type": "Fail",
+      "Cause": "Pipeline failed at one of the Glue jobs"
+    }
+  }
+}
