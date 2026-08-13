@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'NYC TLC Event-Driven Data Pipeline - Lambda, Step Functions, and SNS'
+
+Parameters:
+  EmailAddress:
+    Type: String
+    Description: Email address for pipeline notifications
+    AllowedPattern: ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid email address
+
+  S3BucketName:
+    Type: String
+    Description: Name of the S3 bucket (without account ID suffix)
+    Default: mission-deh-hof-nyc-tlc
+
+Resources:
+  MissionDEHHOFSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: mission-deh-hof-cft
+      DisplayName: NYC TLC Pipeline Notifications
+      Subscription:
+        - Endpoint: !Ref EmailAddress
+          Protocol: email
+
+  MissionDEHHOFStepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: mission-deh-hof-step-function-role-cft
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Policies:
+        - PolicyName: mission-deh-hof-step-function-policy-cft
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:StartJobRun
+                  - glue:GetJobRun
+                  - glue:GetJobRuns
+                  - glue:BatchStopJobRun
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref MissionDEHHOFSNSTopic
+
+  MissionDEHHOFStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: mission-deh-hof-nyc-tlc-data-pipeline-event-driven-cft
+      RoleArn: !GetAtt MissionDEHHOFStepFunctionRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "NYC TLC Data Pipeline - Event-driven processing with failure notifications",
+          "StartAt": "RawToCurated",
+          "States": {
+            "RawToCurated": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "mission-deh-hof-nyc-tlc-raw-curated-script"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "NotifyRawToCuratedFailure",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "Next": "CuratedToAggregated"
+            },
+            "CuratedToAggregated": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "mission-deh-hof-nyc-tlc-curated-aggregated-script"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "NotifyCuratedToAggregatedFailure",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "Next": "PipelineSuccess"
+            },
+            "NotifyRawToCuratedFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${MissionDEHHOFSNSTopic}",
+                "Subject": "NYC TLC Pipeline FAILED - Raw to Curated",
+                "Message.$": "$.error"
+              },
+              "Next": "PipelineFailure"
+            },
+            "NotifyCuratedToAggregatedFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${MissionDEHHOFSNSTopic}",
+                "Subject": "NYC TLC Pipeline FAILED - Curated to Aggregated",
+                "Message.$": "$.error"
+              },
+              "Next": "PipelineFailure"
+            },
+            "PipelineSuccess": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${MissionDEHHOFSNSTopic}",
+                "Subject": "NYC TLC Pipeline SUCCESS",
+                "Message": "Pipeline completed successfully: Raw to Curated -> Curated to Aggregated"
+              },
+              "End": true
+            },
+            "PipelineFailure": {
+              "Type": "Fail",
+              "Cause": "Pipeline failed at one of the Glue jobs"
+            }
+          }
+        }
+
+  MissionDEHHOFLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: mission-deh-hof-lambda-trigger-role-cft
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: mission-deh-hof-lambda-trigger-policy-cft
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref MissionDEHHOFStateMachine
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${S3BucketName}-${AWS::AccountId}/*'
+
+  MissionDEHHOFLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: mission-deh-hof-trigger-step-function-cft
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt MissionDEHHOFLambdaRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          sfn = boto3.client('stepfunctions')
+          sts = boto3.client('sts')
+
+          def lambda_handler(event, context):
+              account_id = sts.get_caller_identity()['Account']
+              region = os.environ['AWS_REGION']
+
+              for record in event['Records']:
+                  key = record['s3']['object']['key']
+
+                  if key.endswith('ingestion.done'):
+                      sfn.start_execution(
+                          stateMachineArn=f'arn:aws:states:{region}:{account_id}:stateMachine:mission-deh-hof-nyc-tlc-data-pipeline-event-driven-cft'
+                      )
+                      return {'statusCode': 200, 'body': 'Step Function triggered'}
+
+              return {'statusCode': 200, 'body': 'No ingestion.done file found'}
+
+  MissionDEHHOFLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MissionDEHHOFLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub 'arn:aws:s3:::${S3BucketName}-${AWS::AccountId}'
+
+Outputs:
+  StateMachineArn:
+    Description: ARN of the Step Functions State Machine
+    Value: !Ref MissionDEHHOFStateMachine
+    Export:
+      Name: mission-deh-hof-state-machine-arn-cft
+
+  SNSTopicArn:
+    Description: ARN of the SNS Topic for notifications
+    Value: !Ref MissionDEHHOFSNSTopic
+    Export:
+      Name: mission-deh-hof-sns-topic-arn-cft
+
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt MissionDEHHOFLambdaFunction.Arn
+    Export:
+      Name: mission-deh-hof-lambda-trigger-arn-cft
+
+  ManualStepRequired:
+    Description: Manual configuration needed after stack creation
+    Value: !Sub |
+      IMPORTANT: Configure S3 Event Notification manually:
+      1. Go to S3 bucket: ${S3BucketName}-${AWS::AccountId}
+      2. Properties -> Event notifications -> Create event notification
+      3. Event name: mission-deh-hof-trigger-pipeline-cft
+      4. Event types: All object create events
+      5. Prefix: raw/
+      6. Suffix: ingestion.done
+      7. Destination: Lambda function -> ${MissionDEHHOFLambdaFunction}
+      8. Confirm SNS subscription email for: ${EmailAddress}
