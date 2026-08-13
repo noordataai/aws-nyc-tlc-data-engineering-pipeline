@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment
+.env
+.venv
+venv/
+env/
+
+# AWS credentials - NEVER commit these
+.aws/
+credentials
+*.pem
+*.key
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Temp files
+*.tmp
+*.temp
+
+# Data files - never commit raw data
+*.parquet
+*.csv
+*.json.gz
+
+# Spark
+spark-warehouse/
+derby.log
+metastore_db/
+
+# Glue
+*.jar
